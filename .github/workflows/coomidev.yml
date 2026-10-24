@@ -86,7 +86,7 @@ jobs:
           APK=$(find apps/coomi-app/app/build/outputs/apk/release -name 'CoomiDev-*.apk' | head -1)
           echo "APK=$APK"
           test -n "$APK" || { echo '::error::CoomiDev APK not found'; exit 1; }
-          apksigner verify --verbose "$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$APK"
           "$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$APK" | tee /tmp/badging.txt
           grep -q "package: name='com.coomidev.android'" /tmp/badging.txt || { echo '::error::package mismatch'; exit 1; }
           grep -q "application-label:'CoomiDev'" /tmp/badging.txt || { echo '::error::label mismatch'; exit 1; }
