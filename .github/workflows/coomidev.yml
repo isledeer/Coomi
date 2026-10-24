@@ -1,0 +1,101 @@
+name: CoomiDev APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Source branch or tag to build
+        type: string
+        default: codex/custom-coomidev-ci
+      upload_apk:
+        description: Upload the CoomiDev APK artifact
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coomidev-apk
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: '2'
+      RUNTIME_REPOSITORY: TensorHub-ORG/Coomi
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.22.0'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install Android SDK/NDK
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.0.12077973'
+
+      - name: Install Rust toolchain
+        working-directory: apps/coomi-rs
+        run: rustup show active-toolchain
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('apps/coomi-rs/Cargo.lock', 'apps/coomi-rs/rust-toolchain.toml') }}
+
+      - run: npm ci
+        working-directory: apps/web
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: runtime-v2-dist
+          key: runtime-v2-${{ env.RUNTIME_REPOSITORY }}-${{ hashFiles('apps/coomi-app/app/src/main/assets/runtime-v2-manifest.json') }}
+          restore-keys: |
+            runtime-v2-${{ env.RUNTIME_REPOSITORY }}-
+
+      - name: Download and verify pinned runtime
+        run: python3 scripts/runtime-v2/download.py --repository "$RUNTIME_REPOSITORY"
+
+      - name: Bundle generated runtime manifest
+        run: cp runtime-v2-dist/runtime-v2-manifest.json apps/coomi-app/app/src/main/assets/runtime-v2-manifest.json
+
+      - name: Build CoomiDev preview APK with automatic debug signing
+        env:
+          COOMI_DEV_BUILD: '1'
+        run: ./gradlew --no-daemon --max-workers=2 :app:printVersionInfo :app:assembleRelease
+
+      - name: Verify APK identity and signature
+        run: |
+          APK=$(find apps/coomi-app/app/build/outputs/apk/release -name 'CoomiDev-*.apk' | head -1)
+          echo "APK=$APK"
+          test -n "$APK" || { echo '::error::CoomiDev APK not found'; exit 1; }
+          apksigner verify --verbose "$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$APK" | tee /tmp/badging.txt
+          grep -q "package: name='com.coomidev.android'" /tmp/badging.txt || { echo '::error::package mismatch'; exit 1; }
+          grep -q "application-label:'CoomiDev'" /tmp/badging.txt || { echo '::error::label mismatch'; exit 1; }
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: inputs.upload_apk
+        with:
+          name: coomidev-apk
+          path: apps/coomi-app/app/build/outputs/apk/release/CoomiDev-*.apk
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
